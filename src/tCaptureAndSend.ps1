@@ -1,3 +1,8 @@
+# --- Fallback for $PSScriptRoot when running via IEX or from a remote source ---
+if (-not $PSScriptRoot -or $PSScriptRoot -eq '') {
+    $PSScriptRoot = (Get-Location).Path
+}
+
 # ===============================
 # Enable DPI Awareness to capture full resolution on high DPI screens
 # ===============================
@@ -17,8 +22,6 @@ function Encrypt-String {
         [Parameter(Mandatory)]
         [string]$password
     )
-
-    # Create AES instance
     $aes = [System.Security.Cryptography.AesManaged]::new()
     $aes.KeySize = 256
     $aes.BlockSize = 128
@@ -51,7 +54,6 @@ function Decrypt-String {
         [Parameter(Mandatory)]
         [string]$password
     )
-
     $allBytes = [Convert]::FromBase64String($cipherText)
     # Extract the first 16 bytes as salt
     $salt = $allBytes[0..15]
@@ -76,7 +78,7 @@ function Decrypt-String {
 # ===============================
 # Credential Handling (Using AES Encryption)
 # ===============================
-# Set credential file path to the repository folder you want (e.g., "src")
+# Set credential file path (adjust folder as needed)
 $CredFile = Join-Path $PSScriptRoot "src\cred.dat"
 
 function Get-Credentials {
@@ -84,7 +86,6 @@ function Get-Credentials {
         [string]$CredFile
     )
     if (-not (Test-Path $CredFile)) {
-        # File doesn't exist: Prompt user to enter credentials and a passphrase
         Write-Host "Credential file not found. Please enter your Telegram credentials."
         $PlainBotToken = Read-Host "Enter your Telegram Bot Token"
         $PlainChatID   = Read-Host "Enter your Telegram Chat ID"
@@ -111,20 +112,18 @@ function Get-Credentials {
         return $CredObject
     }
     else {
-        # File exists: Prompt for the passphrase to decrypt credentials
         $CredObject = Get-Content $CredFile -Raw | ConvertFrom-Json
         $PassphraseSecure = Read-Host "Enter passphrase to decrypt credentials" -AsSecureString
         $Passphrase = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($PassphraseSecure)
         )
-        # Decrypt credentials
         $DecryptedBotToken = Decrypt-String -cipherText $CredObject.BotToken -password $Passphrase
         $DecryptedChatID   = Decrypt-String -cipherText $CredObject.ChatID   -password $Passphrase
         return @{ BotToken = $DecryptedBotToken; ChatID = $DecryptedChatID }
     }
 }
 
-# Retrieve credentials (will prompt for passphrase as needed)
+# Retrieve credentials (this will prompt for passphrase if needed)
 $Creds = Get-Credentials -CredFile $CredFile
 $BotToken = $Creds.BotToken
 $ChatID   = $Creds.ChatID
