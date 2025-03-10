@@ -21,20 +21,26 @@ catch {
 }
 
 # ===============================
-# Decrypt-Credential Function (fallback to plain text if conversion fails)
+# Decrypt-Credential Function (checks for encrypted format)
 # ===============================
 function Decrypt-Credential {
     param ([string]$EncryptedString)
-    try {
-        # Attempt to convert assuming the string is an encrypted secure string
-        $secure = ConvertTo-SecureString $EncryptedString -ErrorAction Stop
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        return $plain
+    # If the string looks like an encrypted secure string (usually starts with "01000000")
+    if ($EncryptedString -match '^01000000') {
+        try {
+            $secure = ConvertTo-SecureString $EncryptedString -ErrorAction Stop
+            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+            return $plain
+        }
+        catch {
+            # If conversion fails, fall back to plain text
+            return $EncryptedString
+        }
     }
-    catch {
-        # If conversion fails, assume the credential is already plain text
+    else {
+        # Otherwise, assume the credential is plain text
         return $EncryptedString
     }
 }
