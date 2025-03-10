@@ -1,7 +1,7 @@
 # ------------------------------
 # Set a default passphrase for automation (change this value to your actual passphrase)
 # ------------------------------
-$DefaultPassphrase = "YourSecurePassphrase"  # <<< Replace with your passphrase
+$DefaultPassphrase = "YourSecurePassphrase"  # <<< Replace with your actual passphrase
 
 # ------------------------------
 # Define a local base directory in APPDATA for storing files
@@ -18,8 +18,13 @@ $CredFile = Join-Path $LocalBase "cred.dat"
 if (-not (Test-Path $CredFile)) {
     Write-Host "cred.dat not found locally. Attempting to download from GitHub..."
     try {
-        $remoteCredUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/refs/heads/main/src/cred.dat"
+        $remoteCredUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/main/src/cred.dat"
         Invoke-WebRequest -Uri $remoteCredUrl -OutFile $CredFile -UseBasicParsing
+        # Check that the file is non-empty
+        if ((Get-Content $CredFile -Raw).Trim() -eq "") {
+            Write-Host "Downloaded cred.dat is empty. Exiting..."
+            exit
+        }
         Write-Host "Downloaded cred.dat successfully."
     }
     catch {
@@ -77,25 +82,41 @@ function Decrypt-String {
         [Parameter(Mandatory)]
         [string]$password
     )
-    $allBytes = [Convert]::FromBase64String($cipherText)
+    try {
+        $allBytes = [Convert]::FromBase64String($cipherText)
+    }
+    catch {
+        Write-Host "Error: Invalid cipher text. Cannot convert from Base64." 
+        exit
+    }
+    # Ensure we have at least 16 bytes of salt
+    if ($allBytes.Length -lt 17) {
+        Write-Host "Error: Cipher text is too short."
+        exit
+    }
     # Extract the first 16 bytes as salt
     $salt = $allBytes[0..15]
     # The remaining bytes are the cipher data
     $cipherBytes = $allBytes[16..($allBytes.Length - 1)]
+    try {
+        $aes = [System.Security.Cryptography.AesManaged]::new()
+        $aes.KeySize = 256
+        $aes.BlockSize = 128
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
 
-    $aes = [System.Security.Cryptography.AesManaged]::new()
-    $aes.KeySize = 256
-    $aes.BlockSize = 128
-    $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($password, $salt, 10000)
+        $aes.Key = $deriveBytes.GetBytes($aes.KeySize / 8)
+        $aes.IV  = $deriveBytes.GetBytes($aes.BlockSize / 8)
 
-    $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($password, $salt, 10000)
-    $aes.Key = $deriveBytes.GetBytes($aes.KeySize / 8)
-    $aes.IV  = $deriveBytes.GetBytes($aes.BlockSize / 8)
-
-    $decryptor = $aes.CreateDecryptor()
-    $decryptedBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
-    return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
+        $decryptor = $aes.CreateDecryptor()
+        $decryptedBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
+        return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
+    }
+    catch {
+        Write-Host "Decryption error: $_"
+        exit
+    }
 }
 
 # ------------------------------
@@ -110,7 +131,16 @@ function Get-Credentials {
         exit
     }
     else {
-        $CredObject = Get-Content $CredFile -Raw | ConvertFrom-Json
+        $content = Get-Content $CredFile -Raw
+        if ($content.Trim() -eq "") {
+            Write-Host "Credential file is empty. Exiting..."
+            exit
+        }
+        $CredObject = $content | ConvertFrom-Json
+        if (-not $CredObject -or -not $CredObject.BotToken -or -not $CredObject.ChatID) {
+            Write-Host "Invalid credential file content. Exiting..."
+            exit
+        }
         $Passphrase = Get-Passphrase
         $DecryptedBotToken = Decrypt-String -cipherText $CredObject.BotToken -password $Passphrase
         $DecryptedChatID   = Decrypt-String -cipherText $CredObject.ChatID   -password $Passphrase
