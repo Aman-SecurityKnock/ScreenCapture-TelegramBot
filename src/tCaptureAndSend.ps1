@@ -8,7 +8,7 @@ Add-Type -MemberDefinition @"
 [MyNamespace.NativeMethods]::SetProcessDPIAware() | Out-Null
 
 # ===============================
-# Configuration & Encrypted Credentials from Remote Source
+# Configuration & Credentials from Remote Source
 # ===============================
 $credUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/refs/heads/main/src/cred.dat"
 try {
@@ -20,13 +20,23 @@ catch {
     exit
 }
 
+# ===============================
+# Decrypt-Credential Function (fallback to plain text if conversion fails)
+# ===============================
 function Decrypt-Credential {
     param ([string]$EncryptedString)
-    $secure = ConvertTo-SecureString $EncryptedString
-    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    return $plain
+    try {
+        # Attempt to convert assuming the string is an encrypted secure string
+        $secure = ConvertTo-SecureString $EncryptedString -ErrorAction Stop
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        return $plain
+    }
+    catch {
+        # If conversion fails, assume the credential is already plain text
+        return $EncryptedString
+    }
 }
 
 $BotToken = Decrypt-Credential -EncryptedString $Cred.BotToken
