@@ -1,39 +1,44 @@
-name: ScreenCapture Telegram Bot
+name: Run ScreenCapture PowerShell Script
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # Runs every 15 minutes (adjust as needed)
-  workflow_dispatch: # Allows manual triggering
+    # Runs every day at 12:00 UTC (adjust as needed)
+    - cron: '0 12 * * *'
+  workflow_dispatch: # Allows manual triggering from GitHub UI
 
 jobs:
-  capture-and-send:
-    runs-on: windows-latest # Required for screenshot functionality
+  run-powershell:
+    runs-on: windows-latest # Use Windows runner since it's a PowerShell script
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4 # Fetches your repo, including combined2.ps1
+      # Step 1: Checkout the repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    - name: Set Up PowerShell Environment
-      shell: pwsh
-      run: |
-        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Unrestricted -Force
-        Write-Output "PowerShell environment ready"
+      # Step 2: Set up PowerShell environment
+      - name: Setup PowerShell
+        shell: pwsh
+        run: |
+          # Ensure PowerShell 7+ is available (more modern than default Windows PowerShell)
+          Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
 
-    - name: Run ScreenCapture Script
-      shell: pwsh
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }} # Store in GitHub Secrets
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}     # Store in GitHub Secrets
-      run: |
-        # Execute the script from the src folder
-        & .\src\combined2.ps1 -RunOnce
-        Write-Output "Screenshot captured and sent at $(Get-Date)"
+      # Step 3: Run the PowerShell script
+      - name: Execute Combined2 Script
+        shell: pwsh
+        env:
+          # Add any environment variables your script needs (e.g., Telegram bot token)
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Execute the script from the src folder
+          .\src\combined2.ps1
 
-    - name: Upload Screenshot (Optional)
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: screenshot-output
-        path: |
-          *.png
-          *.jpg
-          *.log
+      # Optional Step 4: Upload artifacts (e.g., screenshots) if your script generates files
+      - name: Upload Artifacts
+        if: success() # Only if the script succeeds
+        uses: actions/upload-artifact@v4
+        with:
+          name: screencapture-output
+          path: |
+            *.png
+            *.jpg
+            *.log
