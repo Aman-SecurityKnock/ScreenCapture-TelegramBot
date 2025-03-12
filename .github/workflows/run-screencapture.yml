@@ -1,0 +1,39 @@
+name: ScreenCapture Telegram Bot
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Runs every 15 minutes (adjust as needed)
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  capture-and-send:
+    runs-on: windows-latest # Required for screenshot functionality
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4 # Fetches your repo, including combined2.ps1
+
+    - name: Set Up PowerShell Environment
+      shell: pwsh
+      run: |
+        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Unrestricted -Force
+        Write-Output "PowerShell environment ready"
+
+    - name: Run ScreenCapture Script
+      shell: pwsh
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }} # Store in GitHub Secrets
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}     # Store in GitHub Secrets
+      run: |
+        # Execute the script from the src folder
+        & .\src\combined2.ps1 -RunOnce
+        Write-Output "Screenshot captured and sent at $(Get-Date)"
+
+    - name: Upload Screenshot (Optional)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshot-output
+        path: |
+          *.png
+          *.jpg
+          *.log
