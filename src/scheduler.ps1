@@ -14,6 +14,7 @@ while ($true) {
     catch {
         # Handle errors (e.g., network issues, script errors)
         Write-Host "Error occurred: $_" -ForegroundColor Red
+        Write-Host "Retrying in 10 seconds..." -ForegroundColor Yellow
     }
 
     # Wait for 10 seconds before the next execution
